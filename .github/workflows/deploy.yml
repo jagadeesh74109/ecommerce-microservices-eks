@@ -1,0 +1,173 @@
+name: Build and Deploy Microservices to EKS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: ecommerce-eks-cluster
+  ECR_PRODUCT_REPO: ecommerce-product-service
+  ECR_ORDER_REPO: ecommerce-order-service
+  ECR_FRONTEND_REPO: ecommerce-frontend
+  DB_USERNAME: admin
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+    
+    - name: Create ECR repositories if they don't exist
+      run: |
+        for repo in $ECR_PRODUCT_REPO $ECR_ORDER_REPO $ECR_FRONTEND_REPO; do
+          aws ecr describe-repositories --repository-names $repo --region $AWS_REGION || \
+          aws ecr create-repository --repository-name $repo --region $AWS_REGION
+        done
+    
+    # Build Product Service
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: 'maven'
+    
+    - name: Build Product Service
+      working-directory: ./product-service
+      run: mvn clean package -DskipTests
+    
+    - name: Build and push Product Service image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd product-service
+        docker build -t $ECR_REGISTRY/$ECR_PRODUCT_REPO:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_PRODUCT_REPO:$IMAGE_TAG
+        docker tag $ECR_REGISTRY/$ECR_PRODUCT_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_PRODUCT_REPO:latest
+        docker push $ECR_REGISTRY/$ECR_PRODUCT_REPO:latest
+    
+    # Build Order Service
+    - name: Build Order Service
+      working-directory: ./order-service
+      run: mvn clean package -DskipTests
+    
+    - name: Build and push Order Service image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd order-service
+        docker build -t $ECR_REGISTRY/$ECR_ORDER_REPO:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_ORDER_REPO:$IMAGE_TAG
+        docker tag $ECR_REGISTRY/$ECR_ORDER_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_ORDER_REPO:latest
+        docker push $ECR_REGISTRY/$ECR_ORDER_REPO:latest
+    
+    # Build Frontend
+    - name: Build and push Frontend image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd frontend
+        docker build -t $ECR_REGISTRY/$ECR_FRONTEND_REPO:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_FRONTEND_REPO:$IMAGE_TAG
+        docker tag $ECR_REGISTRY/$ECR_FRONTEND_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_FRONTEND_REPO:latest
+        docker push $ECR_REGISTRY/$ECR_FRONTEND_REPO:latest
+    
+    # Deploy to EKS
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+    
+    - name: Get RDS Endpoint
+      id: get-rds
+      run: |
+        RDS_ENDPOINT=$(aws rds describe-db-instances \
+          --db-instance-identifier ecommerce-eks-postgres \
+          --query 'DBInstances[0].Endpoint.Address' \
+          --output text)
+        echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
+    
+    - name: Deploy to EKS
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+        RDS_ENDPOINT: ${{ steps.get-rds.outputs.rds_endpoint }}
+        DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      run: |
+        # Create namespace
+        kubectl apply -f k8s/namespace.yaml
+        
+        # Create secrets from GitHub Secrets (NOT from file)
+        kubectl create secret generic db-credentials \
+          --from-literal=DB_USERNAME=${{ env.DB_USERNAME }} \
+          --from-literal=DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
+          --from-literal=DB_URL="jdbc:postgresql://$RDS_ENDPOINT:5432/ecommerce" \
+          --namespace=ecommerce \
+          --dry-run=client -o yaml | kubectl apply -f -
+        
+        # Deploy Product Service
+        sed "s|IMAGE_PLACEHOLDER_PRODUCT|$ECR_REGISTRY/$ECR_PRODUCT_REPO:$IMAGE_TAG|g" \
+          k8s/product-service/deployment.yaml > k8s/product-service/deployment-final.yaml
+        kubectl apply -f k8s/product-service/deployment-final.yaml
+        kubectl apply -f k8s/product-service/service.yaml
+        
+        # Deploy Order Service
+        sed "s|IMAGE_PLACEHOLDER_ORDER|$ECR_REGISTRY/$ECR_ORDER_REPO:$IMAGE_TAG|g" \
+          k8s/order-service/deployment.yaml > k8s/order-service/deployment-final.yaml
+        kubectl apply -f k8s/order-service/deployment-final.yaml
+        kubectl apply -f k8s/order-service/service.yaml
+        
+        # Deploy Frontend
+        sed "s|IMAGE_PLACEHOLDER_FRONTEND|$ECR_REGISTRY/$ECR_FRONTEND_REPO:$IMAGE_TAG|g" \
+          k8s/frontend/deployment.yaml > k8s/frontend/deployment-final.yaml
+        kubectl apply -f k8s/frontend/deployment-final.yaml
+        kubectl apply -f k8s/frontend/service.yaml
+        
+        # Deploy Ingress
+        kubectl apply -f k8s/ingress/ingress.yaml
+        
+        # Wait for deployments
+        echo "Waiting for Product Service deployment..."
+        kubectl rollout status deployment/product-service -n ecommerce --timeout=5m
+        
+        echo "Waiting for Order Service deployment..."
+        kubectl rollout status deployment/order-service -n ecommerce --timeout=5m
+        
+        echo "Waiting for Frontend deployment..."
+        kubectl rollout status deployment/frontend -n ecommerce --timeout=5m
+    
+    - name: Get Ingress URL
+      run: |
+        echo "==================================="
+        echo "Deployment completed successfully!"
+        echo "==================================="
+        echo ""
+        echo "Waiting for Ingress to get external IP..."
+        sleep 60
+        echo ""
+        echo "Application Ingress:"
+        kubectl get ingress -n ecommerce
+        echo ""
+        echo "NGINX Ingress Controller Service:"
+        kubectl get svc -n ingress-nginx ingress-nginx-controller
+        echo ""
+        echo "==================================="
+        echo "Access your application at the EXTERNAL-IP above"
+        echo "==================================="

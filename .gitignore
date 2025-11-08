@@ -1,0 +1,31 @@
+# Java
+target/
+*.class
+*.jar
+*.war
+
+# Node
+node_modules/
+build/
+.env
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/.terraform.lock.hcl
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+
+# Secrets - NEVER commit these
+k8s/secrets.yaml
+terraform.tfvars
+*.tfvars
+*.pem
+*.key
+.env
