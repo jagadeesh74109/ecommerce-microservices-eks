@@ -93,7 +93,13 @@ function App() {
                 <p>No products yet. Add some via API!</p>
                 <code>
                   POST /api/products<br/>
-                  {`{"name":"Laptop","description":"Gaming laptop","price":999.99,"stock":10,"category":"Electronics"}`}
+                  {JSON.stringify({
+                    name: "Laptop",
+                    description: "Gaming laptop",
+                    price: 999.99,
+                    stock: 10,
+                    category: "Electronics"
+                  }, null, 2)}
                 </code>
               </div>
             ) : (
