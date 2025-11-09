@@ -13,7 +13,7 @@ variable "project_name" {
 variable "db_username" {
   description = "Database master username"
   type        = string
-  default     = "ecom_admin"
+  default     = "admin"
 }
 
 variable "db_password" {

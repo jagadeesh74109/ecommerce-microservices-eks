@@ -11,7 +11,7 @@ env:
   ECR_PRODUCT_REPO: ecommerce-product-service
   ECR_ORDER_REPO: ecommerce-order-service
   ECR_FRONTEND_REPO: ecommerce-frontend
-  DB_USERNAME: ecom_admin
+  DB_USERNAME: admin
 
 jobs:
   build-and-deploy:
